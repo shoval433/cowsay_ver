@@ -1,0 +1,267 @@
+pipeline{
+
+    triggers{
+        pollSCM '* * * * *'
+    }
+
+    options {
+        timestamps()
+        gitLabConnection('my-repo') 
+      
+    }
+
+    agent any
+
+   parameters{
+        string name: 'VER_manual', defaultValue: '0'
+   }
+
+   environment{
+       def IS_BRANCH_NEW="0"
+       def TAG=0
+       def NEXT_VER=0
+       def VER=0
+
+   }
+
+
+    stages{
+        stage("chekout"){
+            steps{
+                echo "========executing chekout========"
+                deleteDir()
+                checkout scm
+            }
+        }
+
+    
+        stage("GitBranch Automatic"){
+            when{
+                expression{
+                    return ("$VER_manual" == "0")
+                }
+            }
+            steps{
+                echo "========executing GitBranch Automatic========"
+               script {
+                    withCredentials([gitUsernamePassword(credentialsId: '2053d2c3-e0ab-4686-b031-9a1970106e8d', gitToolName: 'Default')]){
+                        VER=sh(returnStdout: true, script: 'bash what_is.sh $gitlabTargetBranch').trim()
+                        
+                        try{
+                        sh "git checkout $gitlabTargetBranch"
+                        }catch(err) {
+                            sh "git checkout main"
+                            VER=0
+                        }
+                        
+                    }
+                }
+                
+               
+            }
+            
+            
+        }
+         stage("GitBranch Manual"){
+            when{
+                expression{
+                    return ("$VER_manual" != "0")
+                }
+            }
+            steps{
+                echo "========executing GitBranch Manual========"
+                script {
+                    withCredentials([gitUsernamePassword(credentialsId: '2053d2c3-e0ab-4686-b031-9a1970106e8d', gitToolName: 'Default')]){
+                        
+                        def branchName = "release/${VER_manual}"
+                        
+                        try {
+                            // new branch
+                            sh "git checkout main"
+                            sh "git checkout -b ${branchName} main"
+                            sh "echo ${VER_manual} > v.txt"
+                            sh "echo NOT FOR RELEASE >> v.txt"
+                            sh"""
+                            git config --global user.email "jenkins@jenkins.com"
+                            git config --global user.name "jenkins"
+                            """
+                            sh "git add v.txt"
+                            TAG= sh(returnStdout: true, script: 'echo ${VER_manual}.1')
+                            sh "git commit -m 'Updating v.txt for release ${params.VER_manual}'"
+                            sh "git tag $TAG"
+                            sh "git push origin HEAD $TAG"
+                            
+                            IS_BRANCH_NEW="1"
+                            echo "${TAG}"
+                            echo "${IS_BRANCH_NEW}"
+                        } catch (err) {
+                           
+                            echo "not first"
+                        }
+                    }
+                }
+                
+               
+            }
+            
+            
+        }
+        stage("build"){
+            steps{
+                
+                echo "========executing build========"
+                sh """
+                docker rm -f app
+                sleep 4
+                cd  cowsay/cowsay_Shoval 
+                docker build --tag shoval_private_ecr .
+                """
+            }
+
+        }
+        stage("test"){
+            steps{
+                
+                echo "========executing test========"
+                sh """
+                
+                sleep 4
+                docker run -d -p 4001:3001 --name app --network ubuntu_default  shoval_private_ecr
+                sleep 5
+                curl http://app:8080/
+                docker rm -f app
+                """
+            }
+
+        }
+
+
+        stage("chekout2"){
+            steps{
+                echo "========executing chekout2========"
+                deleteDir()
+                checkout scm
+                
+            }
+        }
+        
+        stage("Old Branch Manual"){
+            when{
+                expression{
+                    return ("$IS_BRANCH_NEW" == "0" && "$VER_manual" != "0")
+                }
+            }
+            steps{
+                script{
+                    echo "========executing Old Branch Manual========"
+                    try {
+                        
+                        NEXT_VER=sh(returnStdout: true, script: 'bash tag_add.sh $gitlabTargetBranch').trim()
+                        withCredentials([gitUsernamePassword(credentialsId: '2053d2c3-e0ab-4686-b031-9a1970106e8d', gitToolName: 'Default')]){
+                            
+                            sh "git checkout release/${VER_manual}"
+                            
+                            sh "git tag $NEXT_VER"
+                            sh "git push  origin $NEXT_VER"
+                            sh "docker tag shoval_private_ecr shoval_private_ecr:M-${NEXT_VER}"
+                            docker.withRegistry("http://644435390668.dkr.ecr.eu-west-3.amazonaws.com/shoval_private_ecr", "ecr:eu-west-3:644435390668") {
+                            docker.image("shoval_private_ecr:M-${NEXT_VER}").push()
+                            }
+                        }
+                        
+                    } catch (err) {
+                        echo "no tag for the commit"
+                    }
+                }
+                
+                
+            }
+        }
+        stage("From release Automatic"){
+            when{
+                expression{
+                    return ("$VER_manual" == "0" && "$VER" != "0")
+                }
+            }
+            steps{
+                script{
+                    echo "========executing From release Automatic========"
+                    try {
+                        
+                        NEXT_VER=sh(returnStdout: true, script: 'bash tag_add.sh $gitlabTargetBranch').trim()
+                        withCredentials([gitUsernamePassword(credentialsId: '2053d2c3-e0ab-4686-b031-9a1970106e8d', gitToolName: 'Default')]){
+                            sh "git checkout release/${VER}"
+                            
+                            sh "git tag $NEXT_VER"
+                            sh "git push  origin $NEXT_VER"
+                            //
+                        }
+                        script{
+                            sh "docker tag shoval_private_ecr shoval_private_ecr:${NEXT_VER}"
+                            docker.withRegistry("http://644435390668.dkr.ecr.eu-west-3.amazonaws.com/shoval_private_ecr", "ecr:eu-west-3:644435390668") {
+                            docker.image("shoval_private_ecr:${NEXT_VER}").push()
+                            }
+                        }
+                    } catch (err) {
+                        echo "no tag for the commit"
+                    }
+                }
+                
+                
+            }
+        }
+        stage("From release Manual"){
+            when{
+                expression{
+                    return ("$IS_BRANCH_NEW" == "1" && "$VER_manual" != "0")
+                }
+            }
+            steps{
+                script{
+                    echo "========executing From release Manual========"
+                        script{
+                            sh "docker tag shoval_private_ecr shoval_private_ecr:M-${VER_manual}.1"
+                            docker.withRegistry("http://644435390668.dkr.ecr.eu-west-3.amazonaws.com/shoval_private_ecr", "ecr:eu-west-3:644435390668") {
+                            docker.image("shoval_private_ecr:M-${VER_manual}.1").push()
+                            }
+                        }
+                   
+                }
+                
+                
+            }
+        }
+        
+    }
+    
+    post{
+        success{
+            script{
+                
+                script{
+                    emailext    recipientProviders: [culprits()],
+                    subject: 'yes', body: 'ooooononononn',  
+                    attachLog: true
+                }     
+            
+            
+                gitlabCommitStatus(connection: gitLabConnection(gitLabConnection: 'my-repo' , jobCredentialId: ''),name: 'report'){
+                    echo "hi you"
+                }
+            }
+        }
+        failure {
+            script{
+                emailext   recipientProviders: [culprits()],
+                subject: 'YOU ARE BETTER THEN THAT !!! ', body: 'Dear programmer, you have broken the code, you are asked to immediately sit on the chair and leave the coffee corner.',  
+                attachLog: true
+            }      
+
+            gitlabCommitStatus(connection: gitLabConnection(gitLabConnection: 'my-repo' , jobCredentialId: ''),name: 'report'){
+                echo "hi you"
+            }
+
+            
+        }
+    }
+}
